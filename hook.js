@@ -3,6 +3,7 @@ const parse = require('url').parse
 const crypto = require('./crypto')
 const request = require('./request')
 const match = require('./provider/match')
+const querystring = require('querystring')
 
 const hook = {
 	request: {
@@ -65,7 +66,7 @@ hook.target.path = [
 
 hook.request.before = ctx => {
 	const req = ctx.req
-	req.url = (req.url.startsWith('http://') ? '' : (req.socket.encrypted ? 'https:' : 'http:') + '//music.163.com') + req.url
+	req.url = (req.url.startsWith('http://') ? '' : (req.socket.encrypted ? 'https:' : 'http:') + '//' + (['music.163.com', 'music.126.net'].some(domain => (req.headers.host || '').endsWith(domain)) ? req.headers.host : null)) + req.url
 	const url = parse(req.url)
 	if([url.hostname, req.headers.host].some(host => hook.target.host.includes(host)) && req.method == 'POST' && (url.path == '/api/linux/forward' || url.path.startsWith('/eapi/'))){
 		return request.read(req)
@@ -99,7 +100,7 @@ hook.request.before = ctx => {
 		})
 		.catch(error => console.log(error, ctx.req.url))
 	}
-	if((hook.target.host.includes(url.hostname)) && url.path.startsWith('/weapi/')){
+	else if((hook.target.host.includes(url.hostname)) && (url.path.startsWith('/weapi/') || url.path.startsWith('/api/'))){
 		ctx.req.headers['X-Real-IP'] = '118.88.88.88'
 		ctx.netease = {web: true, path: url.path.replace(/^\/weapi\//, '/api/').replace(/\?.+$/, '').replace(/\/\d*$/, '')}
 	}
@@ -126,7 +127,7 @@ hook.request.after = ctx => {
 	const proxyRes = ctx.proxyRes
 	if(netease && hook.target.path.includes(netease.path) && proxyRes.statusCode == 200){
 		return request.read(proxyRes, true)
-		.then(buffer => proxyRes.body = buffer)
+		.then(buffer => buffer.length ? proxyRes.body = buffer : Promise.reject())
 		.then(buffer => {
 			const patch = string => string.replace(/([^\\]"\s*:\s*)(\d{16,})(\s*[}|,])/g, '$1"$2L"$3') // for js precision
 			try{
@@ -167,10 +168,15 @@ hook.request.after = ctx => {
 			body = body.replace(/([^\\]"\s*:\s*)"(\d{16,})L"(\s*[}|,])/g, '$1$2$3') // for js precision
 			proxyRes.body = (netease.encrypted ? crypto.eapi.encrypt(Buffer.from(body)) : body)
 		})
-		.catch(error => console.log(error, ctx.req.url))
+		.catch(error => error ? console.log(error, ctx.req.url) : null)
 	}
 	else if(package){
-		if(/p\d+c*.music.126.net/.test(ctx.req.url)){
+		const req = ctx.req
+		if([201, 301, 302, 303, 307, 308].includes(proxyRes.statusCode)){
+			return request(req.method, parse(req.url).resolve(proxyRes.headers.location), req.headers)
+			.then(response => ctx.proxyRes = response)
+		}
+		else if(/p\d+c*.music.126.net/.test(ctx.req.url)){
 			proxyRes.headers['content-type'] = 'audio/mpeg'
 		}
 	}
@@ -209,7 +215,7 @@ const pretendPlay = ctx => {
 	const netease = ctx.netease
 	let turn = 'http://music.163.com/api/song/enhance/player/url'
 	let query = null
-	if(netease.linux){
+	if(netease.forward){
 		netease.param = {
 			ids: `["${netease.param.id}"]`,
 			br: netease.param.br
@@ -275,10 +281,11 @@ const tryMatch = ctx => {
 			.then(song => {
 				item.url = global.endpoint ? `${global.endpoint}/package/${crypto.base64.encode(song.url)}/${item.id}.mp3` : song.url
 				item.md5 = song.md5 || crypto.md5.digest(song.url)
+				item.br = song.br || 128000
 				item.size = song.size
 				item.code = 200
-				item.br = 320000
 				item.type = 'mp3'
+				item.freeTrialInfo = null
 				return song
 			})
 			.then(song => {
@@ -295,8 +302,9 @@ const tryMatch = ctx => {
 				const task = {key: song.url.replace(/\?.*$/, ''), url: song.url}
 				try{
 					let header = netease.param.header
+					let cookie = querystring.parse(ctx.req.headers.cookie.replace(/\s/g, ''), ';')
 					header = typeof(header) === 'string' ? JSON.parse(header) : header
-					let os = header.os, version = header.appver
+					let os = header.os || cookie.os, version = header.appver || cookie.appver
 					if(os in limit && newer(limit[os], version))
 						return cache(computeHash, task, 7 * 24 * 60 * 60 * 1000).then(value => item.md5 = value)
 				}
